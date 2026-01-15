@@ -123,7 +123,7 @@ export default async function handler(req, res) {
         const { width, height } = page.getSize();
         const pad = 24;
 
-        let x = width ;
+        let x = width / 2;
         let y = height / 2;
 
         if (pos === "top-left") {
