@@ -1,55 +1,99 @@
-import { PDFDocument, StandardFonts, rgb, degrees } from 'pdf-lib';
+import { PDFDocument, StandardFonts, rgb, degrees } from "pdf-lib";
 
 /**
- * Upgraded endpoint: add multiple texts + watermark on all pages in ONE request.
+ * Upgraded endpoint: accepts pdfBase64 OR pdfUrl.
  *
- * Body:
+ * Body (recommended):
  * {
- *   pdfBase64: string,
- *   texts?: Array<{ text:string, x:number, y:number, pageNumber?:number|-1, fontSize?:number, color?:{r,g,b}, opacity?:number, rotate?:number }>,
- *   watermark?: { text:string, applyToAll?:boolean, fontSize?:number, opacity?:number, rotate?:number, color?:{r,g,b}, position?:'center'|'top-left'|'top-right'|'bottom-left'|'bottom-right' },
+ *   pdfBase64?: string,
+ *   pdfUrl?: string,
+ *   texts?: Array<{
+ *     text: string,
+ *     x?: number,
+ *     y?: number,
+ *     pageNumber?: number | -1,   // -1 = all pages
+ *     fontSize?: number,
+ *     color?: { r:number, g:number, b:number }, // 0..1
+ *     opacity?: number,           // 0..1
+ *     rotate?: number             // degrees
+ *   }>,
+ *   watermark?: {
+ *     text: string,
+ *     applyToAll?: boolean,       // default true
+ *     fontSize?: number,          // default 48
+ *     opacity?: number,           // default 0.15
+ *     rotate?: number,            // default 45
+ *     color?: { r:number, g:number, b:number }, // default gray
+ *     position?: "center"|"top-left"|"top-right"|"bottom-left"|"bottom-right"
+ *   }
  * }
  *
- * Notes:
- * - pageNumber: -1 means "all pages".
- * - watermark defaults to all pages.
+ * Returns:
+ *  { pdfBase64: string, pageCount: number }
  */
+
+function clamp01(v, fallback) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(0, Math.min(1, n));
+}
+
+function toColor(c, fallback = { r: 0, g: 0, b: 0 }) {
+  const src = c && typeof c === "object" ? c : fallback;
+  return rgb(clamp01(src.r, fallback.r), clamp01(src.g, fallback.g), clamp01(src.b, fallback.b));
+}
+
+async function fetchPdfBytesFromUrl(url) {
+  // Note: Vercel runtime supports fetch
+  const r = await fetch(url, { redirect: "follow" });
+  if (!r.ok) throw new Error(`Không tải được PDF từ pdfUrl. HTTP ${r.status}`);
+  const ab = await r.arrayBuffer();
+  const buf = Buffer.from(ab);
+  if (!buf.length) throw new Error("Nội dung tải về rỗng");
+  return buf;
+}
+
+function decodePdfBase64(b64) {
+  const clean = String(b64).trim().replace(/^data:application\/pdf;base64,?/i, "");
+  const buf = Buffer.from(clean, "base64");
+  if (!buf.length) throw new Error("pdfBase64 không hợp lệ (decode ra buffer rỗng)");
+  return buf;
+}
+
 export default async function handler(req, res) {
-  if (req.method !== 'POST') {
-    res.setHeader('Allow', ['POST']);
-    return res.status(405).json({ error: 'Chỉ chấp nhận phương thức POST' });
+  if (req.method !== "POST") {
+    res.setHeader("Allow", ["POST"]);
+    return res.status(405).json({ error: "Chỉ chấp nhận phương thức POST" });
   }
 
   try {
     const body = req.body || {};
-    const { pdfBase64 } = body;
-    if (!pdfBase64 || typeof pdfBase64 !== 'string') {
-      return res.status(400).json({ error: 'Thiếu dữ liệu file PDF.' });
+
+    // 1) Load input PDF bytes from pdfBase64 OR pdfUrl
+    let inputBytes;
+
+    if (body.pdfBase64 && typeof body.pdfBase64 === "string") {
+      inputBytes = decodePdfBase64(body.pdfBase64);
+    } else if (body.pdfUrl && typeof body.pdfUrl === "string") {
+      inputBytes = await fetchPdfBytesFromUrl(body.pdfUrl);
+    } else {
+      return res.status(400).json({ error: "Thiếu dữ liệu file PDF. Cần pdfBase64 hoặc pdfUrl." });
     }
 
-    const inputBytes = Buffer.from(String(pdfBase64).trim().replace(/^data:application\/pdf;base64,?/i, ''), 'base64');
+    // 2) Parse PDF
     const pdfDoc = await PDFDocument.load(inputBytes);
     const pages = pdfDoc.getPages();
     const pageCount = pages.length;
-    if (!pageCount) return res.status(400).json({ error: 'PDF không có trang nào.' });
+    if (!pageCount) return res.status(400).json({ error: "PDF không có trang nào." });
 
     const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
 
-    const clamp01 = (v, fallback) => {
-      const n = Number(v);
-      if (!Number.isFinite(n)) return fallback;
-      return Math.max(0, Math.min(1, n));
-    };
-
-    const toColor = (c, fallback = { r: 0, g: 0, b: 0 }) => {
-      const src = c && typeof c === 'object' ? c : fallback;
-      return rgb(clamp01(src.r, fallback.r), clamp01(src.g, fallback.g), clamp01(src.b, fallback.b));
-    };
-
+    // 3) Helper: draw one text config
     const drawTextCfg = (page, cfg) => {
       if (!cfg || !cfg.text) return;
-      const x = typeof cfg.x === 'number' ? cfg.x : 50;
-      const y = typeof cfg.y === 'number' ? cfg.y : 750;
+
+      const x = Number.isFinite(Number(cfg.x)) ? Number(cfg.x) : 50;
+      const y = Number.isFinite(Number(cfg.y)) ? Number(cfg.y) : 750;
       const size = Number.isFinite(Number(cfg.fontSize)) ? Number(cfg.fontSize) : 12;
       const opacity = clamp01(cfg.opacity, 1);
       const rotateDeg = Number.isFinite(Number(cfg.rotate)) ? Number(cfg.rotate) : 0;
@@ -65,7 +109,7 @@ export default async function handler(req, res) {
       });
     };
 
-    // A) watermark
+    // 4) Watermark (optional)
     if (body.watermark && body.watermark.text) {
       const wm = body.watermark;
       const applyAll = wm.applyToAll !== false; // default true
@@ -73,32 +117,33 @@ export default async function handler(req, res) {
       const wmOpacity = clamp01(wm.opacity, 0.15);
       const wmRotate = Number.isFinite(Number(wm.rotate)) ? Number(wm.rotate) : 45;
       const wmColor = toColor(wm.color, { r: 0.5, g: 0.5, b: 0.5 });
-      const pos = wm.position || 'center';
+      const pos = wm.position || "center";
 
       const drawWm = (page) => {
         const { width, height } = page.getSize();
-        let x = width / 2;
-        let y = height / 2;
         const pad = 24;
 
-        if (pos === 'top-left') {
+        let x = width / 2;
+        let y = height / 2;
+
+        if (pos === "top-left") {
           x = pad;
           y = height - pad;
-        } else if (pos === 'top-right') {
+        } else if (pos === "top-right") {
           x = width - pad;
           y = height - pad;
-        } else if (pos === 'bottom-left') {
+        } else if (pos === "bottom-left") {
           x = pad;
           y = pad;
-        } else if (pos === 'bottom-right') {
+        } else if (pos === "bottom-right") {
           x = width - pad;
           y = pad;
         }
 
-        // If centered, rough centering by shifting half text width
+        // Rough center shift
         const textStr = String(wm.text);
         const shift = (textStr.length * wmSize) / 6;
-        const finalX = pos === 'center' ? x - shift : x;
+        const finalX = pos === "center" ? x - shift : x;
 
         page.drawText(textStr, {
           x: finalX,
@@ -111,17 +156,15 @@ export default async function handler(req, res) {
         });
       };
 
-      if (applyAll) {
-        pages.forEach(drawWm);
-      } else {
-        drawWm(pages[0]);
-      }
+      if (applyAll) pages.forEach(drawWm);
+      else drawWm(pages[0]);
     }
 
-    // B) texts
+    // 5) Text overlays (optional) - supports many, supports pageNumber = -1
     if (Array.isArray(body.texts)) {
       for (const t of body.texts) {
         const pn = Number.isFinite(Number(t.pageNumber)) ? Number(t.pageNumber) : 0;
+
         if (pn === -1) {
           pages.forEach((p) => drawTextCfg(p, t));
         } else {
@@ -129,14 +172,40 @@ export default async function handler(req, res) {
           drawTextCfg(pages[safe], t);
         }
       }
+    } else if (typeof body.text === "string" && body.text.trim() !== "") {
+      // Backward-compatible single text mode
+      const pn = Number.isFinite(Number(body.pageNumber)) ? Number(body.pageNumber) : 0;
+      const cfg = {
+        text: body.text,
+        x: body.x,
+        y: body.y,
+        pageNumber: pn,
+        fontSize: body.fontSize,
+        color: body.color,
+        opacity: body.opacity,
+        rotate: body.rotate,
+      };
+
+      if (pn === -1) pages.forEach((p) => drawTextCfg(p, cfg));
+      else {
+        const safe = Math.max(0, Math.min(pageCount - 1, pn));
+        drawTextCfg(pages[safe], cfg);
+      }
+    } else {
+      // Allow watermark-only; otherwise complain
+      if (!body.watermark || !body.watermark.text) {
+        return res.status(400).json({ error: "Thiếu nội dung chữ (texts/text) hoặc watermark." });
+      }
     }
 
+    // 6) Save
     const outBytes = await pdfDoc.save();
-    const outBase64 = Buffer.from(outBytes).toString('base64');
-    res.setHeader('Content-Type', 'application/json');
+    const outBase64 = Buffer.from(outBytes).toString("base64");
+
+    res.setHeader("Content-Type", "application/json");
     return res.status(200).json({ pdfBase64: outBase64, pageCount });
   } catch (err) {
-    console.error('Error processing PDF:', err);
-    return res.status(500).json({ error: 'Không thể xử lý PDF.' });
+    console.error("Error processing PDF:", err);
+    return res.status(500).json({ error: err?.message || "Không thể xử lý PDF." });
   }
 }
