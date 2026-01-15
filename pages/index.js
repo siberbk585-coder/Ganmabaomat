@@ -1,194 +1,113 @@
-import { useState } from 'react';
+import { useState } from "react";
 
-/**
- * The home page renders a simple interface to upload a PDF, specify
- * overlay text and its position, then send the data to the API.  When
- * the server responds with the modified PDF, the page creates a
- * download link for the user.  This component is intentionally
- * straightforward so that non‑developers can follow the code and
- * behaviour easily.
- */
 export default function Home() {
-  // Local state for the selected file, text and coordinates.
-  const [file, setFile] = useState(null);
-  const [text, setText] = useState('');
+  const [pdfBase64, setPdfBase64] = useState("");
+  const [text, setText] = useState("CONFIDENTIAL");
   const [x, setX] = useState(50);
-  const [y, setY] = useState(750);
-  const [pageNumber, setPageNumber] = useState(1);
-  const [watermark, setWatermark] = useState('');
-  const [downloadUrl, setDownloadUrl] = useState(null);
+  const [y, setY] = useState(50);
+  const [pageNumber, setPageNumber] = useState(-1); // -1 = all pages
+  const [fontSize, setFontSize] = useState(12);
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
+  const [resultBase64, setResultBase64] = useState("");
 
-  /**
-   * Convert an ArrayBuffer to a base64 string.  Vercel functions
-   * receive and return data encoded as base64.  This helper is
-   * abstracted to simplify the upload handler below.
-   *
-   * @param {ArrayBuffer} buffer
-   * @returns {string}
-   */
-  function arrayBufferToBase64(buffer) {
-    let binary = '';
-    const bytes = new Uint8Array(buffer);
-    const len = bytes.byteLength;
-    for (let i = 0; i < len; i++) {
-      binary += String.fromCharCode(bytes[i]);
+  async function handleProcess() {
+    setLoading(true);
+    setResultBase64("");
+
+    // ✅ TÍNH TOÁN Ở NGOÀI object fetch (sửa lỗi syntax)
+    const pnInput = parseInt(pageNumber, 10);
+    const pn = Number.isFinite(pnInput) ? pnInput : -1;
+
+    try {
+      const res = await fetch("/api/processPdf", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          pdfBase64,
+          texts: [
+            {
+              text,
+              x: Number(x),
+              y: Number(y),
+              pageNumber: pn, // -1 = all pages
+              fontSize: Number(fontSize),
+            },
+          ],
+          watermark: {
+            text: "CONFIDENTIAL",
+            applyToAll: true,
+            opacity: 0.15,
+            rotate: 45,
+          },
+        }),
+      });
+
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || "Request failed");
+
+      // API trả về { pdfBase64: "..." }
+      setResultBase64(data.pdfBase64 || "");
+    } catch (e) {
+      alert(e.message || String(e));
+    } finally {
+      setLoading(false);
     }
-    return btoa(binary);
   }
 
-  /**
-   * Handle form submission by reading the selected PDF, encoding it
-   * to base64 and sending it to the API route.  The API returns a
-   * new base64 string representing the modified PDF.  When the
-   * response arrives we create a Blob and generate a temporary URL
-   * for download.
-   *
-   * @param {React.FormEvent} event
-   */
-  const handleSubmit = async (event) => {
-    event.preventDefault();
-    setError('');
-    setDownloadUrl(null);
-    if (!file) {
-      setError('Vui lòng chọn file PDF trước.');
-      return;
-    }
-    if (!text && !watermark) {
-      setError('Vui lòng nhập nội dung chữ và/hoặc watermark.');
-      return;
-    }
-    setLoading(true);
-    try {
-      // Read the PDF file into an ArrayBuffer
-      const reader = new FileReader();
-      reader.readAsArrayBuffer(file);
-      reader.onload = async () => {
-        const arrayBuffer = reader.result;
-        const pdfBase64 = arrayBufferToBase64(arrayBuffer);
-        // Send request to the API
-        const response = await fetch('/api/addText', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          const pnInput = parseInt(pageNumber, 10);
-          const pn = Number.isFinite(pnInput) ? (pnInput === 0 ? -1 : pnInput - 1) : 0;
-
-          body: JSON.stringify({
-            pdfBase64,
-            text: text || undefined,
-            x: parseFloat(x),
-            y: parseFloat(y),
-            // Tip: nhập 0 để áp dụng chữ cho TẤT CẢ các trang
-            pageNumber: pn,
-            watermark: watermark
-              ? { text: watermark, opacity: 0.15, rotate: 45, fontSize: 48 }
-              : undefined,
-          }),
-        });
-        if (!response.ok) {
-          const data = await response.json();
-          setError(data.error || 'Xử lý file thất bại.');
-        } else {
-          const data = await response.json();
-          const modifiedPdfBase64 = data.pdfBase64;
-          // Convert base64 to Blob for download
-          const binaryString = atob(modifiedPdfBase64);
-          const len = binaryString.length;
-          const bytes = new Uint8Array(len);
-          for (let i = 0; i < len; i++) {
-            bytes[i] = binaryString.charCodeAt(i);
-          }
-          const blob = new Blob([bytes], { type: 'application/pdf' });
-          const url = URL.createObjectURL(blob);
-          setDownloadUrl(url);
-        }
-        setLoading(false);
-      };
-      reader.onerror = (err) => {
-        setLoading(false);
-        setError('Không thể đọc file PDF.');
-      };
-    } catch (err) {
-      setLoading(false);
-      setError('Đã xảy ra lỗi khi gửi dữ liệu.');
-    }
-  };
-
   return (
-    <div style={{ fontFamily: 'sans-serif', maxWidth: 600, margin: '0 auto', padding: '2rem' }}>
-      <h1 style={{ textAlign: 'center' }}>Thêm chữ vào PDF</h1>
-      <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-        <label>
-          Chọn file PDF:
-          <input
-            type="file"
-            accept="application/pdf"
-            onChange={(e) => setFile(e.target.files[0])}
-          />
-        </label>
-        <label>
-          Nội dung chữ:
-          <input
-            type="text"
-            value={text}
-            onChange={(e) => setText(e.target.value)}
-            placeholder="Nhập nội dung..."
-          />
-        </label>
-        <label>
-          Watermark (tuỳ chọn):
-          <input
-            type="text"
-            value={watermark}
-            onChange={(e) => setWatermark(e.target.value)}
-            placeholder="VD: CONFIDENTIAL"
-          />
-        </label>
-        <label>
-          Trang (bắt đầu từ 1, nhập 0 = tất cả):
-          <input
-            type="number"
-            min="0"
-            value={pageNumber}
-            onChange={(e) => setPageNumber(e.target.value)}
-          />
-        </label>
-        <label>
-          Toạ độ X:
-          <input
-            type="number"
-            value={x}
-            onChange={(e) => setX(e.target.value)}
-          />
-        </label>
-        <label>
-          Toạ độ Y:
-          <input
-            type="number"
-            value={y}
-            onChange={(e) => setY(e.target.value)}
-          />
-        </label>
-        {loading ? (
-          <button type="button" disabled>
-            Đang xử lý...
-          </button>
-        ) : (
-          <button type="submit">Gửi và Tải về PDF mới</button>
-        )}
-      </form>
-      {error && <p style={{ color: 'red' }}>{error}</p>}
-      {downloadUrl && (
-        <p>
-          Tệp đã sẵn sàng: <a href={downloadUrl} download="modified.pdf">Tải PDF đã chỉnh sửa</a>
-        </p>
-      )}
-      <p style={{ marginTop: '2rem', fontSize: '0.9rem', color: '#666' }}>
-        Lưu ý: (1) Trong PDF, gốc toạ độ (0,0) nằm ở góc dưới bên trái. (2) Nhập Trang = 0 để áp dụng chữ cho tất cả trang.
-      </p>
+    <div style={{ padding: 24, fontFamily: "Arial" }}>
+      <h2>PDF Overlay (Text + Watermark)</h2>
+
+      <p>Dán pdfBase64 vào đây (hoặc dùng n8n gọi API trực tiếp).</p>
+
+      <textarea
+        value={pdfBase64}
+        onChange={(e) => setPdfBase64(e.target.value)}
+        rows={8}
+        style={{ width: "100%" }}
+        placeholder="pdfBase64..."
+      />
+
+      <div style={{ marginTop: 12 }}>
+        <label>Text: </label>
+        <input value={text} onChange={(e) => setText(e.target.value)} />
+      </div>
+
+      <div style={{ marginTop: 8 }}>
+        <label>X: </label>
+        <input type="number" value={x} onChange={(e) => setX(e.target.value)} />
+        <label style={{ marginLeft: 12 }}>Y: </label>
+        <input type="number" value={y} onChange={(e) => setY(e.target.value)} />
+        <label style={{ marginLeft: 12 }}>Font size: </label>
+        <input
+          type="number"
+          value={fontSize}
+          onChange={(e) => setFontSize(e.target.value)}
+        />
+        <label style={{ marginLeft: 12 }}>Page (-1 = all): </label>
+        <input
+          type="number"
+          value={pageNumber}
+          onChange={(e) => setPageNumber(e.target.value)}
+        />
+      </div>
+
+      <button
+        onClick={handleProcess}
+        disabled={loading || !pdfBase64}
+        style={{ marginTop: 12 }}
+      >
+        {loading ? "Processing..." : "Process PDF"}
+      </button>
+
+      {resultBase64 ? (
+        <div style={{ marginTop: 16 }}>
+          <p>✅ Done. (Kết quả là pdfBase64, bạn dùng n8n để convert ra file)</p>
+          <textarea value={resultBase64} readOnly rows={6} style={{ width: "100%" }} />
+        </div>
+      ) : null}
     </div>
   );
 }
