@@ -24,7 +24,14 @@ import { PDFDocument, StandardFonts, rgb, degrees } from "pdf-lib";
  *     opacity?: number,           // default 0.15
  *     rotate?: number,            // default 45
  *     color?: { r:number, g:number, b:number }, // default gray
- *     position?: "center"|"top-left"|"top-right"|"bottom-left"|"bottom-right"
+ *     position?: "center"|"top-left"|"top-right"|"bottom-left"|"bottom-right",
+ *
+ *     // ✅ NEW (optional):
+ *     pad?: number,               // default 24 (lùi mép khi corner)
+ *     offsetX?: number,           // default 0  (dịch vị trí)
+ *     offsetY?: number,           // default 0
+ *     fitToPage?: boolean,        // default true (tự giảm fontSize nếu dài)
+ *     maxWidthRatio?: number      // default 0.85 (tối đa % chiều ngang trang)
  *   }
  * }
  *
@@ -40,11 +47,14 @@ function clamp01(v, fallback) {
 
 function toColor(c, fallback = { r: 0, g: 0, b: 0 }) {
   const src = c && typeof c === "object" ? c : fallback;
-  return rgb(clamp01(src.r, fallback.r), clamp01(src.g, fallback.g), clamp01(src.b, fallback.b));
+  return rgb(
+    clamp01(src.r, fallback.r),
+    clamp01(src.g, fallback.g),
+    clamp01(src.b, fallback.b)
+  );
 }
 
 async function fetchPdfBytesFromUrl(url) {
-  // Note: Vercel runtime supports fetch
   const r = await fetch(url, { redirect: "follow" });
   if (!r.ok) throw new Error(`Không tải được PDF từ pdfUrl. HTTP ${r.status}`);
   const ab = await r.arrayBuffer();
@@ -54,7 +64,9 @@ async function fetchPdfBytesFromUrl(url) {
 }
 
 function decodePdfBase64(b64) {
-  const clean = String(b64).trim().replace(/^data:application\/pdf;base64,?/i, "");
+  const clean = String(b64)
+    .trim()
+    .replace(/^data:application\/pdf;base64,?/i, "");
   const buf = Buffer.from(clean, "base64");
   if (!buf.length) throw new Error("pdfBase64 không hợp lệ (decode ra buffer rỗng)");
   return buf;
@@ -77,7 +89,9 @@ export default async function handler(req, res) {
     } else if (body.pdfUrl && typeof body.pdfUrl === "string") {
       inputBytes = await fetchPdfBytesFromUrl(body.pdfUrl);
     } else {
-      return res.status(400).json({ error: "Thiếu dữ liệu file PDF. Cần pdfBase64 hoặc pdfUrl." });
+      return res
+        .status(400)
+        .json({ error: "Thiếu dữ liệu file PDF. Cần pdfBase64 hoặc pdfUrl." });
     }
 
     // 2) Parse PDF
@@ -109,50 +123,75 @@ export default async function handler(req, res) {
       });
     };
 
-    // 4) Watermark (optional)
+    // 4) Watermark (optional) ✅ FIXED: center đúng + không cắt chữ + có offset/pad
     if (body.watermark && body.watermark.text) {
       const wm = body.watermark;
+
       const applyAll = wm.applyToAll !== false; // default true
-      const wmSize = Number.isFinite(Number(wm.fontSize)) ? Number(wm.fontSize) : 48;
+      let wmSize = Number.isFinite(Number(wm.fontSize)) ? Number(wm.fontSize) : 48;
+
       const wmOpacity = clamp01(wm.opacity, 0.15);
       const wmRotate = Number.isFinite(Number(wm.rotate)) ? Number(wm.rotate) : 45;
       const wmColor = toColor(wm.color, { r: 0.5, g: 0.5, b: 0.5 });
+
       const pos = wm.position || "center";
+
+      const pad = Number.isFinite(Number(wm.pad)) ? Number(wm.pad) : 24;
+      const offsetX = Number.isFinite(Number(wm.offsetX)) ? Number(wm.offsetX) : 0;
+      const offsetY = Number.isFinite(Number(wm.offsetY)) ? Number(wm.offsetY) : 0;
+
+      const fitToPage = wm.fitToPage !== false; // default true
+      const maxWidthRatio = Number.isFinite(Number(wm.maxWidthRatio))
+        ? Number(wm.maxWidthRatio)
+        : 0.85;
+
+      const textStr = String(wm.text);
 
       const drawWm = (page) => {
         const { width, height } = page.getSize();
-        const pad = 24;
 
-        let x = width / 2;
+        // đo bề rộng chữ thật để căn chuẩn
+        let textWidth = font.widthOfTextAtSize(textStr, wmSize);
+
+        // fit theo chiều ngang để không bị cắt khi center
+        if (fitToPage) {
+          const maxW = width * maxWidthRatio;
+          if (textWidth > maxW) {
+            const scale = maxW / textWidth;
+            wmSize = Math.max(8, wmSize * scale);
+            textWidth = font.widthOfTextAtSize(textStr, wmSize);
+          }
+        }
+
+        // tính x,y theo position
+        let x = (width - textWidth) / 2;
         let y = height / 2;
 
         if (pos === "top-left") {
           x = pad;
           y = height - pad;
         } else if (pos === "top-right") {
-          x = width - pad;
+          x = width - pad - textWidth;
           y = height - pad;
         } else if (pos === "bottom-left") {
           x = pad;
           y = pad;
         } else if (pos === "bottom-right") {
-          x = width - pad;
+          x = width - pad - textWidth;
           y = pad;
         }
 
-        // Rough center shift
-        const textStr = String(wm.text);
-        const shift = (textStr.length * wmSize) / 6;
-        const finalX = pos === "center" ? x - shift : x;
+        x += offsetX;
+        y += offsetY;
 
         page.drawText(textStr, {
-          x: finalX,
+          x,
           y,
           size: wmSize,
           font,
           color: wmColor,
           opacity: wmOpacity,
-          rotate: degrees(wmRotate),
+          rotate: degrees(wmRotate), // 45 => chéo BL→TR
         });
       };
 
